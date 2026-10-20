@@ -14,6 +14,8 @@ picks the right one automatically:
   away the useless/garbled OCR layer that most scanned PDFs carry), then marker
   runs its full layout + OCR pipeline on it. Text comes out clean and figures
   are still extracted.
+  Without a GPU, ``--ocr google`` sends the pages to Google Cloud Vision instead
+  (see vision_ocr.py); the markdown is rebuilt from what Vision reads.
 
 Both paths then hand the markdown to ``pandoc``, which splits the book into one
 internal HTML file per chapter (``--split-level``). Without that split, e-readers
@@ -46,6 +48,8 @@ from xml.etree import ElementTree
 from xml.sax.saxutils import escape as xml_escape
 from xml.sax.saxutils import unescape as xml_unescape
 
+import vision_ocr
+
 LogFn = Callable[[str], None]
 StopFn = Callable[[], bool]
 
@@ -58,6 +62,10 @@ SCANNED_PAGE_RATIO = 0.5
 # Marker renders its OCR input at 192 dpi by default; 300 dpi here keeps the
 # flattened copy of a scan at least as sharp as the original.
 FLATTEN_DPI = 300
+
+# How scanned PDFs are OCR'd: marker's vision model on the local GPU, or Google
+# Cloud Vision (vision_ocr.py).
+OCR_ENGINES = ("local", "google")
 
 # Windows-only: run child processes on their own (hidden) console, see run_command.
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -567,6 +575,24 @@ def run_marker(
         if path.parent.name == pdf.stem:
             return path
     return markdown[0]
+
+
+def run_cloud_ocr(
+    pdf: Path,
+    work: Path,
+    log: LogFn,
+    should_stop: StopFn | None = None,
+    page_range: str | None = None,
+    monthly_limit: int = vision_ocr.FREE_PAGES_PER_MONTH,
+) -> Path:
+    """OCR a scanned PDF with Google Cloud Vision instead of the GPU; returns the markdown."""
+    try:
+        return vision_ocr.ocr_pdf(
+            pdf, work, log, should_stop=should_stop, page_range=page_range,
+            monthly_limit=monthly_limit,
+        )
+    except vision_ocr.VisionOcrError as error:
+        raise ConversionError(str(error)) from error
 
 
 # --------------------------------------------------------------------------- #
@@ -1593,7 +1619,9 @@ class ConvertOptions:
     author: str | None = None
     cover: Path | None = None
     kind: str = "auto"  # auto | digital | scanned
-    fast_ocr: bool = False  # scanned only: skip layout/figure extraction
+    fast_ocr: bool = False  # scanned + local OCR only: skip layout/figure extraction
+    ocr_engine: str = "local"  # scanned only: local (marker on the GPU) | google (Cloud Vision)
+    vision_monthly_limit: int = vision_ocr.FREE_PAGES_PER_MONTH  # pages; 0 = no limit
     split_level: int | None = None  # None = detect from the markdown
     toc_depth: int | None = None
     toc_tables_to_lists: bool = True
@@ -1629,6 +1657,10 @@ def convert(
     output_dir = options.output_dir.expanduser().resolve()
     if not pdf.exists():
         raise ConversionError(f"PDF not found: {pdf}")
+    if options.ocr_engine not in OCR_ENGINES:
+        raise ConversionError(
+            f"unknown OCR engine {options.ocr_engine!r} (choose one of {', '.join(OCR_ENGINES)})"
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     work = work_directory(options.work_dir)
@@ -1652,6 +1684,17 @@ def convert(
     if options.rebuild_only:
         raw_markdown = find_existing_markdown(out_folder, pdf)
         log(f"   reusing markdown: {raw_markdown}")
+    elif kind == "scanned" and options.ocr_engine == "google":
+        # Vision only sees the rendered pages, so the old text layer needs no
+        # flattening away first.
+        raw_markdown = run_cloud_ocr(
+            pdf,
+            work / "vision",
+            log,
+            should_stop=should_stop,
+            page_range=options.page_range,
+            monthly_limit=options.vision_monthly_limit,
+        )
     else:
         source_pdf = pdf
         if kind == "scanned" and not options.fast_ocr:
@@ -1768,6 +1811,7 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Examples:\n"
                '  python pdf2epub.py "book.pdf" --output-dir "D:\\Books\\epub"\n'
+               '  python pdf2epub.py "scan.pdf" --output-dir "D:\\Books\\epub" --ocr google\n'
                '  python pdf2epub.py "wrong title.epub" --output-dir "D:\\Books\\epub" '
                '--title "Right Title" --author "Right Author"\n',
     )
@@ -1777,9 +1821,19 @@ def main(argv: list[str] | None = None) -> int:
                         help="folder for the EPUB and the markdown/images it was built from")
     parser.add_argument("--type", dest="kind", choices=["auto", "digital", "scanned"],
                         default="auto", help="PDF kind (default: detect automatically)")
+    parser.add_argument("--ocr", dest="ocr_engine", choices=OCR_ENGINES, default="local",
+                        help="how scanned PDFs are OCR'd: 'local' runs marker's vision model "
+                             "on your GPU (default); 'google' sends the pages to Google Cloud "
+                             "Vision instead - no GPU needed, set GOOGLE_VISION_API_KEY first "
+                             "(see MANUAL.md)")
+    parser.add_argument("--vision-monthly-limit", type=int,
+                        default=vision_ocr.FREE_PAGES_PER_MONTH, metavar="PAGES",
+                        help="with --ocr google: stop before a book would take the pages sent "
+                             "this month (counted on this computer) past this number "
+                             "(default: %(default)s, Google's free tier; 0 = no limit)")
     parser.add_argument("--fast-ocr", action="store_true",
-                        help="scanned PDFs: OCR whole pages instead of keeping the "
-                             "layout model (about 2x faster, but figures inside the "
+                        help="scanned PDFs with local OCR: OCR whole pages instead of keeping "
+                             "the layout model (about 2x faster, but figures inside the "
                              "scanned pages are not extracted)")
     parser.add_argument("--title", help="book title (default: metadata inside the file)")
     parser.add_argument("--author", help="author (default: metadata inside the file)")
@@ -1814,6 +1868,8 @@ def main(argv: list[str] | None = None) -> int:
             cover=args.cover,
             kind=args.kind,
             fast_ocr=args.fast_ocr,
+            ocr_engine=args.ocr_engine,
+            vision_monthly_limit=args.vision_monthly_limit,
             split_level=args.split_level,
             toc_depth=args.toc_depth,
             toc_tables_to_lists=not args.no_toc_tables,

@@ -13,6 +13,7 @@ when something goes wrong. For a quick overview see [README.md](README.md).
 | `start_ui.bat` | **Double-click this.** Starts the drag & drop UI with the right Python. |
 | `pdf2epub_ui.py` | The drag & drop UI (a small local web site, stdlib only). |
 | `pdf2epub.py` | The conversion pipeline itself; also usable from the command line. |
+| `vision_ocr.py` | Optional OCR through Google Cloud Vision, for machines without a GPU (section 10). |
 | `requirements.txt` | The Python packages, and the exact sequence that installs them. |
 | `README.md` | Overview, requirements, verified results, contributing. |
 | `LICENSE` | MIT — the licence of the code in this repository. |
@@ -30,7 +31,8 @@ when something goes wrong. For a quick overview see [README.md](README.md).
 2. **Drag your PDF files (or EPUBs) onto the drop area** (or click it to browse).
    Each file is analysed and shows which pipeline it will use:
    * `digital` – the fast text-layer path
-   * `scanned` – it will be OCR'd (this is the slow one)
+   * `scanned` – it will be OCR'd (this is the slow one): on your GPU, or by
+     Google Cloud Vision if you picked that under *Options* (section 10)
    * `epub` – only its title/author (and cover, if you set one) will be rewritten,
      and its table of contents can be reviewed and fixed
 
@@ -79,6 +81,9 @@ More examples:
 # scanned book, explicit title/author and a cover image
 ... pdf2epub.py "book.pdf" --output-dir "G:\converted" --type scanned `
       --title "Title" --author "Author" --cover "G:\covers\cover.jpg"
+
+# scanned book on a PC without an NVIDIA GPU: OCR by Google Cloud Vision (section 10)
+... pdf2epub.py "scan.pdf" --output-dir "G:\converted" --ocr google
 
 # test run on a few pages first (cheap way to check the output quality)
 ... pdf2epub.py "book.pdf" --output-dir "G:\converted\test" --page-range 20-40
@@ -316,7 +321,9 @@ or tick **"Rebuild the EPUB only"** in the UI.
 | UI option | CLI flag | Meaning |
 | --- | --- | --- |
 | pipeline: auto / digital / scanned | `--type auto\|digital\|scanned` | Which pipeline to use. `auto` (default) decides from the PDF: many full-page images or almost no text ⇒ scanned. |
-| Fast OCR | `--fast-ocr` | Scanned PDFs only: OCR whole pages at once, ~2× faster, but pictures *inside* the scanned pages are not cropped out. |
+| OCR for scanned PDFs: on this PC / Google Cloud Vision | `--ocr local\|google` | `local` (default) runs marker's vision model on your GPU; `google` sends the pages to Google Cloud Vision – no GPU needed, see section 10. |
+| Vision pages / month | `--vision-monthly-limit N` | With Google Cloud Vision: refuse a book that would take the pages sent this month past N (default 1000, the free tier; 0 = no limit). |
+| Fast OCR | `--fast-ocr` | Scanned PDFs with local OCR only: OCR whole pages at once, ~2× faster, but pictures *inside* the scanned pages are not cropped out. |
 | Turn printed tables of contents into lists | `--no-toc-tables` (to disable) | See section 6. |
 | Rebuild the EPUB only | `--rebuild-only` | Reuse the markdown already in the output folder. |
 | Chapter split level | `--split-level N` | Override the detected heading level. |
@@ -332,11 +339,15 @@ Re-runs copy, flatten and re-render whole books, so intermediates do **not** go
 into your output folder but into:
 
 ```
-%LOCALAPPDATA%\pdf2epub\_work\        (uploads, flattened scans, marker's raw output)
+%LOCALAPPDATA%\pdf2epub\_work\        (uploads, flattened scans, marker's raw output,
+                                     and Cloud Vision's cached page results in vision\)
 ```
 
 That is deliberate: a flattened 121-page scan is ~78 MB. Deleting that folder is
-always safe. On macOS/Linux it falls back to the system temp directory.
+always safe – the only cost is that Cloud Vision would be paid again for pages it
+had already read. On macOS/Linux it falls back to the system temp directory. The
+count of Cloud Vision pages sent this month is kept next to it, in
+`%LOCALAPPDATA%\pdf2epub\vision-usage.json`.
 
 ---
 
@@ -345,9 +356,10 @@ always safe. On macOS/Linux it falls back to the system temp directory.
 | Piece | Location / version | Needed for |
 | --- | --- | --- |
 | `marker_env` virtual environment | a venv with Python 3.11, torch 2.6.0+cu124, marker-pdf 2.0.0, surya-ocr 0.22.1 | everything |
-| CUDA on the GPU | verified with `torch.cuda.is_available()` | OCR speed |
-| `llama-server.exe` | e.g. `C:\Tools\llama.cpp\llama-server.exe` (build b10199 tested) | OCR (scanned PDFs) |
+| CUDA on the GPU | verified with `torch.cuda.is_available()` | local OCR speed |
+| `llama-server.exe` | e.g. `C:\Tools\llama.cpp\llama-server.exe` (build b10199 tested) | local OCR (scanned PDFs) |
 | Pandoc | 3.1.7 or newer (3.10 tested), on `PATH` | the EPUB |
+| `GOOGLE_VISION_API_KEY` | environment variable, optional | OCR through Google Cloud Vision instead of the GPU (section 10) |
 
 Why `llama-server.exe` is needed at all: marker's OCR engine (surya) runs its
 vision model behind an inference server. On an NVIDIA machine its default choice
@@ -394,6 +406,10 @@ pip install marker-pdf
 pip install torch==2.6.0+cu124 torchvision --index-url https://download.pytorch.org/whl/cu124 --force-reinstall
 ```
 
+**No NVIDIA GPU?** Leave out the `torch==2.6.0+cu124` line: `pip install marker-pdf`
+alone is all the digital path needs (it runs on the CPU), `llama-server` is not
+needed, and scanned books go through Google Cloud Vision (section 10).
+
 Do **not** run `pip install -r requirements.txt` on top of a working CUDA setup:
 marker-pdf's metadata asks for `torch>=2.7`, no CUDA 12.4 wheel of 2.7 exists, and
 pip would silently swap your CUDA torch for the CPU-only build from PyPI (which
@@ -414,7 +430,118 @@ it) – that is all the tool needs. Pandoc:
 
 ---
 
-## 10. Verified results
+## 10. OCR without a GPU: Google Cloud Vision
+
+Scanned books normally go through marker's vision model on an NVIDIA GPU. Without
+one – or when 20 minutes per book is too long – the pages can be read by
+[Google Cloud Vision](https://cloud.google.com/vision) instead. Pick
+**Google Cloud Vision** under *Options → OCR for scanned PDFs* in the UI, or add
+`--ocr google` on the command line. Digital PDFs are not affected: they never need
+OCR and keep using marker's text-layer path, which runs on the CPU.
+
+### What it costs
+
+Cloud Vision charges per page. Google's price list for text detection (October
+2026 – check <https://cloud.google.com/vision/pricing> for the current one):
+
+| Pages per month | Price |
+| --- | --- |
+| the first 1,000 | free |
+| 1,001 – 5,000,000 | US$1.50 per 1,000 pages |
+
+So a 300-page book costs nothing while you stay under 1,000 pages a month, and
+about US$0.45 beyond that. The tool keeps the bill predictable:
+
+* **A monthly limit, 1,000 pages by default.** Before it sends anything, the tool
+  checks how many pages this computer has sent this calendar month, and refuses a
+  book that would go past the limit – nothing is sent. Change it in the UI
+  (*Vision pages / month*) or with `--vision-monthly-limit N`; `0` switches the
+  check off. The count lives in `%LOCALAPPDATA%\pdf2epub\vision-usage.json` and
+  only knows about this computer: if the same Google project is used elsewhere,
+  Google's own count is the one that bills.
+* **No page is paid for twice.** Each page's result is cached under
+  `%LOCALAPPDATA%\pdf2epub\_work\vision\`, keyed by the PDF's content. Converting a
+  book again (say, with another split level), resuming after **Stop** or a crash,
+  or dropping the same PDF under another name sends only the pages not read yet.
+  **Rebuild the EPUB only** does not contact Vision at all.
+* **Try a few pages first**: `--page-range 0-9` sends ten pages.
+* For a hard cap on Google's side as well, lower the API's request quota in the
+  Cloud console (*APIs & Services → Cloud Vision API → Quotas*) and set a budget
+  alert (*Billing → Budgets & alerts*).
+
+### Setting it up (once)
+
+1. Open <https://console.cloud.google.com/> and create a project (or pick one).
+2. **Attach a billing account** to the project (*Billing*). Google requires one for
+   Cloud Vision even when you stay inside the free 1,000 pages.
+3. **Enable the API**: *APIs & Services → Library → Cloud Vision API → Enable*.
+4. **Create an API key**: *APIs & Services → Credentials → Create credentials →
+   API key*. Then edit the key and, under *API restrictions*, restrict it to the
+   Cloud Vision API, so a leaked key is good for nothing else.
+5. **Hand it to pdf2epub** as an environment variable (once; Windows remembers it):
+
+   ```powershell
+   setx GOOGLE_VISION_API_KEY "your-api-key"
+   ```
+
+   `setx` only reaches windows opened afterwards, so close the console and start
+   `start_ui.bat` again. (macOS/Linux: `export GOOGLE_VISION_API_KEY=...` in your
+   shell profile.)
+6. In the UI, choose *Google Cloud Vision* under *Options*. The line below it should
+   read *Using the API key from GOOGLE_VISION_API_KEY* and show how many pages have
+   been sent this month.
+
+Treat the key like a password. The tool sends it in a request header – never in a
+URL – and never writes it to the log.
+
+**Without an API key** (some organisations forbid them): install the optional
+`google-auth` package into the environment (`pip install google-auth`) and either
+point `GOOGLE_APPLICATION_CREDENTIALS` at a service-account key file, or run
+`gcloud auth application-default login` followed by
+`gcloud auth application-default set-quota-project <your project>`. Those
+credentials are used whenever `GOOGLE_VISION_API_KEY` is not set.
+
+### What happens to your pages
+
+Each page is rendered at 200 dpi as a greyscale JPEG (roughly 200–400 KB) and
+uploaded to `vision.googleapis.com`, four at a time – a 300-page book takes a few
+minutes instead of twenty. **The book's content leaves your computer** and Google
+Cloud's terms apply to it, so only do this with documents you are allowed to
+upload. Local OCR uploads nothing.
+
+### How the result differs from local OCR
+
+Vision returns text and where it sits on the page, not a document, so the tool
+rebuilds the structure itself:
+
+* **Paragraphs** come from Vision's own paragraph detection. Words hyphenated at
+  a line end are joined again (`exam-` + `ple` → `example`, while `Anglo-Saxon`
+  keeps its hyphen), and a paragraph cut in two by a page break or a footnote is
+  joined back when the first part does not end a sentence and the second starts
+  in lower case.
+* **Running heads, running feet and page numbers** are dropped: short lines on the
+  top or bottom edge of a page that repeat on other pages, repeat a heading, or
+  are just a number.
+* **Headings** are short paragraphs set at least 15 % larger than the body text.
+  Size is measured on capitals, digits and letters like `b d f h k l t`, so it is
+  the type size that counts, not bold or capitals. Every distinct size becomes a
+  heading level, largest first, and the split level is then picked as in
+  section 6. A label such as `CHAPTER 3` or a large `3` directly above a title is
+  merged with it into one heading: `CHAPTER 3: The Return`.
+* A large **drop cap** is put back at the start of its paragraph.
+* **Footnotes** stay in the text, after the paragraph they interrupted.
+* **No pictures are extracted** – Vision reads text only (the same as Fast OCR).
+* **Two-column pages** come out in the order Vision reads them, which is usually,
+  but not always, column by column.
+
+Chapter titles set at the body size (only bold or italic) are not recognised, so
+such a book comes out as one chapter: add the `#`s in the markdown and rebuild.
+The log says what was found, for example `headings by size: h1: 1, h2: 14, h3: 32`
+and `removed 230 running head(s), feet and page number(s)`.
+
+---
+
+## 11. Verified results
 
 Both test PDFs were converted end to end with this code:
 
@@ -453,12 +580,12 @@ can be previewed straight out of the file, which is how the UI shows them.
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | `docker binary not found` | surya fell back to its vLLM backend | Use `pdf2epub.py`/the UI (they pin the llama.cpp backend), or set `$env:SURYA_INFERENCE_BACKEND="llamacpp"` yourself. |
-| `llama-server binary not found` | OCR needs the binary | Put `llama-server.exe` in `C:\Tools\llama.cpp\` or on your PATH, or set `LLAMA_CPP_BINARY`. |
+| `llama-server binary not found` | Local OCR needs the binary | Put `llama-server.exe` in `C:\Tools\llama.cpp\` or on your PATH, or set `LLAMA_CPP_BINARY` – or OCR with Google Cloud Vision instead (section 10). |
 | Endless `Inference error: Error code: 400 … failed to parse grammar` | The surya `\d` grammar bug | Update the tool (the patch is applied automatically); if you run marker by hand, patch `surya\inference\prompts.py` yourself. |
 | `marker_single is not recognized` | Wrong Python / environment not active | Always go through `start_ui.bat` or the full path to the virtualenv's `python.exe`. |
 | A traceback ending in `KeyboardInterrupt` after a successful run | surya killing its llama-server at exit | Harmless. The tool filters it out; you will not see it in the UI. |
@@ -472,12 +599,18 @@ can be previewed straight out of the file, which is how the UI shows them.
 | The cover changed in the file but the reader still shows the old one | Readers and Calibre cache covers by book | Check the thumbnail in the UI result first (that is the cover that is really in the file). If it is right, delete the book on the device and copy the new file over, or refresh the library entry. |
 | `edit table of contents` is missing on a card | The EPUB has no NCX and no navigation document | Nothing to edit; the card only offers it when the book has a menu. |
 | A menu line is marked orange in the editor | Its target page is not in the book | That entry came from the source EPUB; leave it, or rename it if it is only a label. |
+| `no Google Cloud credentials found`, or the UI says *Cloud Vision is not set up* | `GOOGLE_VISION_API_KEY` is not set where the UI was started | `setx` it (section 10, step 5), then close the console and start `start_ui.bat` again. |
+| `HTTP 403 … Cloud Vision API has not been used in project … or it is disabled` | The API is not enabled in that project | Enable *Cloud Vision API* (section 10, step 3); it can take a few minutes to take effect. |
+| `HTTP 403 …` mentioning billing | The project has no billing account | Attach one (section 10, step 2) – Google requires it even for the free pages. |
+| `HTTP 400 … API key not valid` | A mistyped, deleted or wrongly restricted key | Check the key in the Cloud console, `setx` it again and restart the UI. |
+| `… would take this month's count … past the limit …` | The monthly Cloud Vision page limit | Nothing was sent. Raise *Vision pages / month* (or `--vision-monthly-limit`), or wait for next month. |
+| A Cloud Vision book comes out as one chapter | Its chapter titles are set at the body size | Add `#` headings in the markdown and rebuild (section 10). |
 | `pandoc: command not found` | Pandoc missing | `winget install --exact --id JohnMacFarlane.Pandoc`, then open a new terminal. |
 | UI will not start: "missing marker, pypdfium2, PIL" | Started with the system Python instead of the environment | Use `start_ui.bat`, or set `PDF2EPUB_PYTHON`. |
 
 ---
 
-## 12. Known limits (things worth knowing)
+## 13. Known limits (things worth knowing)
 
 * **Scans are read through the layout model.** A page that is one big image gives
   the OCR a lot to interpret; expect a good but not perfect transcription of the
@@ -485,6 +618,9 @@ can be previewed straight out of the file, which is how the UI shows them.
 * **The tool never deletes anything** (except marker's own leftover helper
   processes, and the previous cover file when a cover is replaced). If the
   automatic cleanup gets something wrong, compare with `Title.raw.md` and rebuild.
+* **Cloud Vision OCR rebuilds the structure from type size and position**
+  (section 10): very good at the text, decent at headings, and it extracts no
+  pictures. Glance at the chapter menu before you trust it.
 * **PDFs whose text layer is a bad OCR layer** look "digital" to the detector
   (there *is* text). If the output is nonsense, force `scanned` – that path
   throws the old layer away and re-OCRs, which is exactly what those files need.
@@ -500,14 +636,14 @@ can be previewed straight out of the file, which is how the UI shows them.
 
   ---
 
-  ## 13. Licensing
+  ## 14. Licensing
 
   The code here is **MIT** ([LICENSE](LICENSE)). Everything it depends on is
   permissively licensed too (marker-pdf and surya-ocr are Apache-2.0, PyTorch is
   BSD-3-Clause, llama.cpp and Pillow are MIT-ish, pypdfium2/PDFium is
   Apache-2.0/BSD-3-Clause), so an MIT project can depend on them freely.
 
-  Two things worth knowing:
+  Three things worth knowing:
 
   * **Pandoc is GPL-2.0-or-later.** It is only ever *executed* as a separate program
     (never imported or linked), which is the accepted way for permissively licensed
@@ -515,7 +651,11 @@ can be previewed straight out of the file, which is how the UI shows them.
     `llama-server`. If you ever *vendor* code from any of these projects into this
     repository, that changes: you would have to keep their licence texts and
     notices, and GPL code could not be copied in at all.
-  * **marker's model weights are not Apache-2.0.** The OCR path downloads them from
+  * **Google Cloud Vision is a paid online service**, not part of this tool: it is only
+    contacted when you choose it, under Google Cloud's terms and prices (section 10).
+    The optional `google-auth` package used for service-account credentials is
+    Apache-2.0.
+  * **marker's model weights are not Apache-2.0.** The local OCR path downloads them from
     Hugging Face under datalab's modified **OpenRAIL-M** licence, which allows
     personal, research and commercial use but restricts organisations above a US$5M
     revenue/funding threshold, requires attribution, and passes its use restrictions

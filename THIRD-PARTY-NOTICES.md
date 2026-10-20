@@ -17,6 +17,7 @@ surprised by that.
 | [PyTorch](https://github.com/pytorch/pytorch) | BSD-3-Clause | runs the models |
 | [pypdfium2](https://github.com/pypdfium2-team/pypdfium2) (and PDFium) | Apache-2.0 / BSD-3-Clause | renders pages and inspects PDFs |
 | [Pillow](https://github.com/python-pillow/Pillow) | MIT-CMU | builds the flattened scan and the cover |
+| [google-auth](https://github.com/googleapis/google-auth-library-python) (optional) | Apache-2.0 | only for Cloud Vision with service-account / gcloud credentials; an API key needs nothing extra |
 
 Apache-2.0, BSD-3-Clause and MIT-CMU are all permissive and compatible with an MIT
 project depending on them. Nothing needs to be done unless this project ever
@@ -29,6 +30,15 @@ kept alongside the copied files.
 | --- | --- | --- |
 | [Pandoc](https://pandoc.org) | GPL-2.0-or-later | It is only ever **executed** as a separate program (`pandoc …`), never linked or imported, so its copyleft does not reach this project's code. The same applies to anything else a user runs. |
 | [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server`) | MIT | separate program started as a subprocess |
+
+## Online service — Google Cloud Vision (optional)
+
+If you choose Google Cloud Vision as the OCR for scanned PDFs (`--ocr google`),
+the page images of the book are uploaded to Google and processed under **your own
+Google Cloud account**, its terms of service and its prices (the first 1,000
+pages a month are free at the time of writing). Nothing from Google is bundled or
+redistributed here — the tool just calls the public REST API with your
+credentials. The local OCR path and the digital path never contact it.
 
 ## Model weights — the one part that is not permissive
 
@@ -58,11 +68,12 @@ terms, that licence:
 Because the tool fetches these models at runtime, the person running it is the one
 who accepts that licence — but this project is what leads them there, so:
 
-* if you use the **scanned/OCR path**, read the model card and licence above before
+* if you use the **scanned/OCR path with local OCR**, read the model card and licence above before
   using it commercially;
 * if you **redistribute this tool** (in any form), keep this notice with it, or
   point users at the licence, so the flow-down requirement is satisfied;
-* the **digital/text-layer path does not use those model weights** at all.
+* the **digital/text-layer path and Cloud Vision OCR do not use those model
+  weights** at all.
 
 Nothing here changes the MIT licence of the code in this repository, and none of
 the model licence restrictions apply to the repository itself — they apply to what

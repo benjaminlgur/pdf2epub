@@ -34,6 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pdf2epub as pipeline  # noqa: E402
+import vision_ocr  # noqa: E402
 
 DEFAULT_PORT = 8765
 MAX_LOG_LINES = 5000
@@ -272,6 +273,8 @@ def run_job(config: dict) -> None:
                         cover=cover,
                         kind=entry.get("kind") or options.get("kind") or "auto",
                         fast_ocr=bool(options.get("fast_ocr")),
+                        ocr_engine=options.get("ocr_engine") or "local",
+                        vision_monthly_limit=vision_limit(options),
                         split_level=options.get("split_level") or None,
                         toc_tables_to_lists=options.get("toc_tables", True),
                         rebuild_only=bool(options.get("rebuild_only"))
@@ -323,6 +326,14 @@ def run_job(config: dict) -> None:
     else:
         JOB.status = "done"
         JOB.log(f"== finished: {total} file(s)")
+
+
+def vision_limit(options: dict) -> int:
+    """The Cloud Vision page limit from the UI; an empty field means the default."""
+    value = options.get("vision_monthly_limit")
+    if value is None or value == "":
+        return vision_ocr.FREE_PAGES_PER_MONTH
+    return max(0, int(value))
 
 
 def start_job(config: dict) -> None:
@@ -387,11 +398,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(JOB.snapshot(since))
             return
         if parsed.path == "/api/info":
+            vision_ready, vision_status = vision_ocr.credentials_status()
             self._send_json(
                 {
                     "python": sys.executable,
                     "pandoc": shutil.which("pandoc") or pipeline.find_pandoc(),
                     "llama_server": pipeline.find_llama_server() or "",
+                    "vision_ready": vision_ready,
+                    "vision_status": vision_status,
+                    "vision_used": vision_ocr.pages_used_this_month(),
+                    "vision_free": vision_ocr.FREE_PAGES_PER_MONTH,
                     "work_dir": str(pipeline.work_directory(None)),
                     "uploads_dir": str(uploads_directory()),
                     "default_output_dir": str(Path.home() / "Documents" / "epub"),
@@ -568,7 +584,9 @@ def main() -> int:
     print(f"PDF -> EPUB UI running at {url}")
     print(f"  python:    {sys.executable}")
     print(f"  pandoc:    {shutil.which('pandoc') or pipeline.find_pandoc()}")
-    print(f"  llama:     {pipeline.find_llama_server() or 'NOT FOUND (OCR will not work)'}")
+    print(f"  llama:     {pipeline.find_llama_server() or 'NOT FOUND (local OCR will not work)'}")
+    vision_ready, vision_status = vision_ocr.credentials_status()
+    print(f"  vision:    {vision_status if vision_ready else 'not set up (' + vision_status + ')'}")
     print(f"  work dir:  {pipeline.work_directory(None)}")
     print("Press Ctrl+C to stop the server.")
     if not os.environ.get("PDF2EPUB_NO_BROWSER"):
@@ -654,6 +672,7 @@ PAGE = r"""<!doctype html>
          white-space:pre-wrap; word-break:break-word; margin:0; }
   .meta { color:var(--muted); font-size:12px; }
   .meta code { color:var(--text); }
+  .meta.warn { color:var(--warn); }
   .hidden { display:none; }
   .result { border:1px solid var(--border); border-radius:8px; padding:10px 12px; margin-bottom:8px; }
   .result.bad { border-color: var(--bad); }
@@ -697,8 +716,9 @@ PAGE = r"""<!doctype html>
   <h1>PDF &rarr; EPUB</h1>
   <p class="hint">
     Drop PDF books (or EPUBs whose title/author needs fixing) below, choose where
-    the EPUBs should go, press Convert. Scanned PDFs are re-OCR'd automatically;
-    digital PDFs are read directly. Long books take a while - the log shows progress.
+    the EPUBs should go, press Convert. Scanned PDFs are re-OCR'd automatically (on
+    your GPU, or by Google Cloud Vision - see Options); digital PDFs are read
+    directly. Long books take a while - the log shows progress.
   </p>
 
   <div class="panel">
@@ -745,9 +765,25 @@ PAGE = r"""<!doctype html>
 
   <h2>Options</h2>
   <div class="panel">
+    <div class="row" style="margin-bottom:6px">
+      <label for="ocrEngine">OCR for scanned PDFs</label>
+      <select id="ocrEngine">
+        <option value="local">on this PC (marker - needs an NVIDIA GPU)</option>
+        <option value="google">Google Cloud Vision (no GPU - uploads the pages)</option>
+      </select>
+    </div>
+    <div id="visionRow" class="hidden" style="margin-bottom:6px">
+      <div class="row">
+        <label for="visionLimit">Vision pages / month</label>
+        <input type="number" id="visionLimit" min="0" step="100" placeholder="1000">
+        <span class="meta">a book that would go past this is refused before anything is
+          sent (0 = no limit). The first 1,000 pages a month are free.</span>
+      </div>
+      <p class="meta" id="visionStatus" style="margin:6px 0 0"></p>
+    </div>
     <label class="check">
       <input type="checkbox" id="fastOcr">
-      <span>Fast OCR (scanned PDFs only)
+      <span>Fast OCR (scanned PDFs, OCR on this PC only)
         <small>About 2x faster, but pictures inside the scanned pages are not
         extracted. Layout-aware OCR is used otherwise.</small></span>
     </label>
@@ -1019,6 +1055,8 @@ function renderResults(results) {
 const coverPath = () => $('cover').value.trim();
 
 const options = () => ({
+  ocr_engine: $('ocrEngine').value,
+  vision_monthly_limit: $('visionLimit').value === '' ? null : Number($('visionLimit').value),
   fast_ocr: $('fastOcr').checked,
   toc_tables: $('tocTables').checked,
   rebuild_only: $('rebuildOnly').checked,
@@ -1304,7 +1342,9 @@ async function poll() {
   }
   setStatus(data.status || 'idle');
   $('active').textContent = data.active ? 'working on ' + data.active : '';
+  const wasRunning = state.running;
   state.running = data.status === 'running';
+  if (wasRunning && !state.running) loadInfo();  // e.g. the Cloud Vision page count
   $('stop').disabled = !state.running;
   updateButtons();
   if (state.running) setTimeout(poll, 700);
@@ -1354,6 +1394,36 @@ $('tocClose').addEventListener('click', () => {
   $('tocFrame').src = 'about:blank';
 });
 
+function updateOcrEngine() {
+  const google = $('ocrEngine').value === 'google';
+  $('visionRow').classList.toggle('hidden', !google);
+  $('fastOcr').disabled = google;
+}
+
+function showVision(info) {
+  const status = $('visionStatus');
+  if (info.vision_ready) {
+    status.className = 'meta';
+    status.textContent = 'Using the ' + info.vision_status + '. ' + info.vision_used +
+      ' page(s) sent from this computer this month (the first ' +
+      info.vision_free.toLocaleString('en-US') + ' are free).';
+  } else {
+    status.className = 'meta warn';
+    status.textContent = 'Cloud Vision is not set up: ' + info.vision_status +
+      '. See MANUAL.md, "OCR without a GPU", then restart this UI.';
+  }
+}
+
+$('ocrEngine').value = localStorage.getItem('pdf2epub.ocr') === 'google' ? 'google' : 'local';
+$('ocrEngine').addEventListener('change', () => {
+  localStorage.setItem('pdf2epub.ocr', $('ocrEngine').value);
+  updateOcrEngine();
+});
+$('visionLimit').value = localStorage.getItem('pdf2epub.visionLimit') || '';
+$('visionLimit').addEventListener('input', () =>
+  localStorage.setItem('pdf2epub.visionLimit', $('visionLimit').value));
+updateOcrEngine();
+
 $('outDir').value = localStorage.getItem('pdf2epub.output') || '';
 $('splitLevel').value = localStorage.getItem('pdf2epub.split') || '';
 $('splitLevel').addEventListener('input', () =>
@@ -1364,13 +1434,21 @@ $('stop').addEventListener('click', () => fetch('/api/stop', { method: 'POST' })
 updateCoverPreview();
 updateButtons();
 
-fetch('/api/info').then((response) => response.json()).then((info) => {
-  $('env').innerHTML =
-    'python: <code>' + esc(info.python) + '</code> &middot; ' +
-    'pandoc: <code>' + esc(info.pandoc) + '</code> &middot; ' +
-    'llama-server: <code>' + esc(info.llama_server || 'not found (OCR unavailable)') + '</code>' +
-    '<br>temp files: <code>' + esc(info.work_dir) + '</code>';
-  if (!localStorage.getItem('pdf2epub.output') && info.default_output_dir) {
+function loadInfo() {
+  return fetch('/api/info').then((response) => response.json()).then((info) => {
+    $('env').innerHTML =
+      'python: <code>' + esc(info.python) + '</code> &middot; ' +
+      'pandoc: <code>' + esc(info.pandoc) + '</code> &middot; ' +
+      'llama-server: <code>' + esc(info.llama_server || 'not found (local OCR unavailable)') + '</code>' +
+      ' &middot; Cloud Vision: <code>' + (info.vision_ready ? 'ready' : 'not set up') + '</code>' +
+      '<br>temp files: <code>' + esc(info.work_dir) + '</code>';
+    showVision(info);
+    return info;
+  }).catch(() => null);
+}
+
+loadInfo().then((info) => {
+  if (info && !localStorage.getItem('pdf2epub.output') && info.default_output_dir) {
     // So the buttons are never mysteriously disabled on a first run.
     $('outDir').value = info.default_output_dir;
   }

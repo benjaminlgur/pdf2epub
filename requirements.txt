@@ -23,6 +23,12 @@
 #
 # pandoc is not a pip package; it is the system binary that writes the EPUB:
 #   winget install --exact --id JohnMacFarlane.Pandoc
+#
+# No NVIDIA GPU: leave out the torch==2.6.0+cu124 step. Digital PDFs run on the
+# CPU, and scanned PDFs can be OCR'd by Google Cloud Vision (--ocr google), which
+# needs no extra package with an API key (GOOGLE_VISION_API_KEY). Only for
+# service-account / gcloud credentials instead of a key:
+#   pip install google-auth
 
 marker-pdf==2.0.0
 surya-ocr==0.22.1

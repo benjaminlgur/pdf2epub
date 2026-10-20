@@ -11,6 +11,7 @@ itself:
 | --- | --- |
 | **Born-digital PDF** | Reads the PDF's own text layer. Fast, CPU-only, ~70 s for 200 pages. |
 | **Scanned PDF** | Re-renders the pages without their (usually bad) OCR layer, then runs full layout-aware OCR on your GPU. |
+| **Scanned PDF, no GPU** | Sends the pages to Google Cloud Vision instead (first 1,000 pages a month free) and rebuilds the book from what it reads. |
 
 Two PDFs of the same book can be wildly different, so the tool checks how much
 real text and how many full-page images a PDF has and picks the right pipeline.
@@ -49,6 +50,11 @@ You can override that per book in the UI.
   chapter (calibrated against four real books), and tells you what it chose.
   You can override it.
 * **Automatic pipeline choice** between text-layer extraction and full OCR.
+* **OCR without a GPU**, through Google Cloud Vision: headings are recognised by
+  their type size, running heads and page numbers are removed, and paragraphs split
+  by a page turn are joined again. Every page's result is cached, so nothing is
+  paid for twice, and a monthly page limit (the 1,000 free pages by default)
+  stops a book before it would cost money.
 * **Clean-up of marker's output**: empty image tags, invisible page anchors, and
   tables that are really a printed table of contents are turned into lists.
 * **Cover images**: set or replace the cover of a converted book, or of an EPUB
@@ -59,8 +65,9 @@ You can override that per book in the UI.
 * **Table-of-contents editor**: rename menu lines, change how deeply they nest,
   move them (with their children), and preview the page each line opens —
   straight from inside the book, with the saved file kept in sync.
-* **Runs entirely offline.** No cloud services, no uploads, no API keys.
-  Images are embedded, so an EPUB is one self-contained file.
+* **Runs offline by default.** Nothing is uploaded unless you choose Google Cloud
+  Vision for a scanned book. Images are embedded, so an EPUB is one
+  self-contained file.
 
 ## Requirements
 
@@ -76,7 +83,8 @@ Linux/macOS should mostly work but has not been tested — see Contributing.
 | PyTorch | 2.6.0+cu124 | the newest CUDA 12.4 wheel |
 | [llama.cpp](https://github.com/ggml-org/llama.cpp/releases) | `llama-server.exe`, b10199 tested | marker's OCR serves its vision model through this |
 | [Pandoc](https://pandoc.org) | 3.1.7+ (3.10 used) | writes the EPUB |
-| NVIDIA GPU | RTX 3090 (24 GB) | **only needed for scanned PDFs**; the text-layer path is CPU-only |
+| NVIDIA GPU | RTX 3090 (24 GB) | **only needed for scanned PDFs with local OCR**; the text-layer path is CPU-only |
+| Google Cloud Vision | API key (optional) | OCR for scanned PDFs without a GPU – see [MANUAL.md §10](MANUAL.md#10-ocr-without-a-gpu-google-cloud-vision) |
 
 Rough sizing: a 200-page digital book converts in about a minute; a 120-page
 scanned book takes about 20 minutes of GPU time.
@@ -100,7 +108,19 @@ winget install --exact --id JohnMacFarlane.Pandoc
 and put `llama-server.exe` from a llama.cpp Windows CUDA build somewhere on your
 `PATH` (or in `C:\Tools\llama.cpp\`, or point `LLAMA_CPP_BINARY` at it).
 
-Two things that will otherwise bite you, and which the tool handles for you:
+**No NVIDIA GPU?** Skip the `torch==2.6.0+cu124` line and `llama-server`:
+`pip install marker-pdf` alone handles digital PDFs on the CPU, and scanned books
+can be OCR'd by Google Cloud Vision. That needs a Google Cloud project with
+billing attached and the Cloud Vision API enabled, plus an API key:
+
+```powershell
+setx GOOGLE_VISION_API_KEY "your-api-key"
+```
+
+The first 1,000 pages a month are free, then Google charges US$1.50 per 1,000.
+MANUAL.md §10 walks through the setup, the costs, and what gets uploaded.
+
+Two things that will otherwise bite you with local OCR, and which the tool handles for you:
 
 * surya shuts its model server down with `os.kill(pid, 0)`, which on Windows
   terminates nothing — it leaves a ~1.5 GB process behind. The tool stops those
@@ -140,6 +160,9 @@ C:\Users\<you>\marker_env\Scripts\python.exe pdf2epub.py "book.pdf" --output-dir
 ... pdf2epub.py "scan.pdf" --output-dir "D:\out" --type scanned `
       --title "Title" --author "Author" --cover "D:\art\cover.jpg"
 
+# a scanned book on a PC without a GPU: OCR by Google Cloud Vision
+... pdf2epub.py "scan.pdf" --output-dir "D:\out" --ocr google
+
 # fix an EPUB you already converted
 ... pdf2epub.py "old title.epub" --output-dir "D:\out" --title "Right Title"
 
@@ -171,8 +194,9 @@ images), the metadata and cover editors, and the table-of-contents round trip
 ## How it works, in one paragraph
 
 [marker](https://github.com/datalab-to/marker) converts the PDF to markdown
-(either from its text layer, or via its vision model for scans), the markdown is
-cleaned up, and [Pandoc](https://pandoc.org) writes an EPUB2 with
+(either from its text layer, or via its vision model for scans – or, without a
+GPU, Google Cloud Vision reads the scan and the markdown is rebuilt from the
+text's size and position), the markdown is cleaned up, and [Pandoc](https://pandoc.org) writes an EPUB2 with
 `--split-level=<chapter level>`, which produces one internal XHTML file per
 chapter. The scanned path adds one trick: the PDF's pages are re-rendered into a
 copy with no text layer first, so marker cannot trust the bad OCR layer that
@@ -182,7 +206,9 @@ change.
 
 ## Known limitations
 
-* **Scans need a GPU** and take ~10–20 s per page.
+* **Local OCR of scans needs a GPU** and takes ~10–20 s per page. Google Cloud
+  Vision needs no GPU and takes a few minutes per book, but uploads the pages,
+  extracts no pictures, and finds headings by type size only (MANUAL.md §10).
 * **Only figures are extracted as images.** A scanned page is not "an image" to a
   reader; for scanned books you should expect few pictures in the result.
 * **A PDF whose text layer is bad OCR looks "digital"** to the detector, because
@@ -238,6 +264,9 @@ Apache-2.0. That licence permits personal, research and commercial use, but it
 forbids use by organisations above a US$5M revenue/funding threshold, requires
 attribution, and passes its use restrictions on to whoever you distribute to.
 
+Google Cloud Vision is a paid online service, not a dependency: it is only
+contacted when you choose it, under Google Cloud's own terms.
+
 There is a short, plain-language breakdown — plus the full list of components and
 licences — in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you only ever
 use the digital/text-layer path, no model weights are involved at all.
@@ -248,6 +277,7 @@ use the digital/text-layer path, no model weights are involved at all.
 | --- | --- |
 | `pdf2epub_ui.py` | the drag & drop UI (stdlib `http.server`, no extra dependencies) |
 | `pdf2epub.py` | the pipeline: detection, extraction, clean-up, Pandoc, EPUB editing |
+| `vision_ocr.py` | optional OCR through Google Cloud Vision (no GPU), stdlib only |
 | `start_ui.bat` | launcher that finds the marker virtualenv |
 | `requirements.txt` | the packages and the exact install sequence |
 | `MANUAL.md` | the detailed manual and troubleshooting table |
